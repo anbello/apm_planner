@@ -15,7 +15,6 @@
 #include "UASManager.h"
 #include "QGC.h"
 #include "GAudioOutput.h"
-//#include "MAVLinkProtocol.h"
 #include "QGCMAVLink.h"
 #include "LinkManager.h"
 #include "MainWindow.h"
@@ -26,6 +25,7 @@
 #include <QSettings>
 #include <iostream>
 #include <QDesktopServices>
+#include <QMutexLocker>
 
 #include <cmath>
 #include <qmath.h>
@@ -2668,15 +2668,23 @@ void UAS::requestParameter(int component, int id)
     //QLOG_DEBUG() << __FILE__ << __LINE__ << "REQUESTING PARAM RETRANSMISSION FROM COMPONENT" << component << "FOR PARAM ID" << id;
 }
 
-void UAS::requestNextParamFromQueue() {
-    if(paramRequestQueue.isEmpty()){
-        m_parameterSendTimer.stop();
-        return;
-    }
+void UAS::requestNextParamFromQueue()
+{
+    int component = 0;
+    QString parameter;
 
-    QPair<int,QString> pr = paramRequestQueue.front();
-    int component = pr.first;
-    QString parameter = pr.second;
+    {   // Scope for mutex
+        QMutexLocker lock(&requestQueueMutex);
+        if(paramRequestQueue.isEmpty())
+        {
+            m_parameterSendTimer.stop();
+            return;
+        }
+
+        QPair<int,QString> pr = paramRequestQueue.takeFirst();
+        component = pr.first;
+        parameter = pr.second;
+    }
 
     // Request parameter, use parameter name to request it
     mavlink_message_t msg;
@@ -2698,7 +2706,6 @@ void UAS::requestNextParamFromQueue() {
     sendMessage(msg);
     QLOG_DEBUG() << __FILE__ << __LINE__ << "REQUESTING PARAM RETRANSMISSION FROM COMPONENT" << component << "FOR PARAM NAME" << parameter;
 
-    paramRequestQueue.pop_front();
 }
 
 /**
@@ -2706,11 +2713,25 @@ void UAS::requestNextParamFromQueue() {
 */
 void UAS::requestParameter(int component, const QString& parameter)
 {
-    QLOG_DEBUG() << "Queuing param " << parameter;
-    QPair<int,QString> p = QPair<int,QString>(component, parameter);
+    if(parameters.contains(component))
+    {
+        QMap<QString, QVariant>* p_componentParams = parameters[component];
 
-    paramRequestQueue.append(p);
-    m_parameterSendTimer.start();
+        if(p_componentParams->contains(parameter))
+        {
+            QLOG_DEBUG() << "Using param " << parameter << " from cache";
+            emit parameterChanged(uasId, component, parameter, p_componentParams->value(parameter));
+        }
+    }
+    else
+    {
+        QLOG_DEBUG() << "Queuing param " << parameter << " for fetching";
+        QPair<int,QString> p = QPair<int,QString>(component, parameter);
+
+        QMutexLocker lock(&requestQueueMutex);
+        paramRequestQueue.append(p);
+        m_parameterSendTimer.start();
+    }
 }
 
 /**
